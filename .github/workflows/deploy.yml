@@ -1,0 +1,197 @@
+name: Deploy to AWS
+
+on:
+  push:
+    branches: [ main, ITA* ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+env:
+  AWS_REGION: us-east-1
+  PROJECT_NAME: devops-assignment
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    name: Test Django Application
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+      
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+        
+    - name: Install dependencies
+      run: |
+        cd django_app
+        pip install -r requirements.txt
+        
+    - name: Run Django tests
+      run: |
+        cd django_app
+        python manage.py migrate
+        python test_app.py
+        
+    - name: Lint Python code
+      run: |
+        pip install flake8
+        flake8 django_app --count --select=E9,F63,F7,F82 --show-source --statistics
+        
+  build:
+    runs-on: ubuntu-latest
+    name: Build Docker Images
+    needs: test
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/ITA')
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+      
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v2
+      
+    - name: Build Django image
+      run: |
+        docker build -t django-app:${{ github.sha }} -f docker/web/Dockerfile django_app/
+        
+    - name: Build PostgreSQL image
+      run: |
+        docker build -t postgres-app:${{ github.sha }} docker/db/
+        
+    - name: Test Docker images
+      run: |
+        # Test that images were built successfully
+        docker images | grep django-app
+        docker images | grep postgres-app
+        
+  deploy:
+    runs-on: ubuntu-latest
+    name: Deploy to AWS
+    needs: [test, build]
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/ITA')
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+      
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v2
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+        
+    - name: Verify AWS credentials
+      run: |
+        aws sts get-caller-identity
+        
+    - name: Set up Terraform
+      uses: hashicorp/setup-terraform@v2
+      with:
+        terraform_version: 1.5.0
+        
+    - name: Set up Ansible
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y ansible
+        
+    - name: Terraform Init
+      run: |
+        cd terraform
+        terraform init
+        
+    - name: Terraform Plan
+      run: |
+        cd terraform
+        terraform plan -out=tfplan
+        
+    - name: Terraform Apply
+      run: |
+        cd terraform
+        terraform apply -auto-approve tfplan
+        
+    - name: Generate Ansible Inventory
+      run: |
+        cd ansible
+        chmod +x generate-inventory.sh
+        ./generate-inventory.sh
+        
+    - name: Wait for instances to be ready
+      run: |
+        echo "Waiting for instances to be ready..."
+        sleep 120
+        
+    - name: Test SSH connectivity
+      run: |
+        cd ansible
+        # Set proper permissions for SSH key
+        chmod 600 ../terraform/terraform-key.pem
+        # Test connectivity with retries
+        for i in {1..5}; do
+          if ansible all -m ping --timeout=30; then
+            echo "SSH connectivity successful"
+            break
+          else
+            echo "SSH connectivity failed, attempt $i/5"
+            sleep 30
+          fi
+        done
+        
+    - name: Deploy with Ansible
+      run: |
+        cd ansible
+        ansible-playbook playbooks/site.yml
+        
+    - name: Run deployment tests
+      run: |
+        chmod +x scripts/test.sh
+        ./scripts/test.sh
+        
+    - name: Get application URLs
+      run: |
+        cd terraform
+        echo "Application deployed successfully!"
+        echo "Access URLs:"
+        echo "- Manager: http://$(terraform output -raw swarm_manager_public_ip)/login/"
+        echo "- Worker A: http://$(terraform output -raw swarm_worker_a_public_ip)/login/"
+        echo "- Worker B: http://$(terraform output -raw swarm_worker_b_public_ip)/login/"
+        
+    - name: Upload test report
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: test-report
+        path: test-report-*.txt
+        
+  cleanup-on-failure:
+    runs-on: ubuntu-latest
+    name: Cleanup on Failure
+    needs: [deploy]
+    if: failure() && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/ITA'))
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+      
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v2
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+        
+    - name: Set up Terraform
+      uses: hashicorp/setup-terraform@v2
+      with:
+        terraform_version: 1.5.0
+        
+    - name: Terraform Destroy
+      run: |
+        cd terraform
+        terraform init
+        terraform destroy -auto-approve
+      continue-on-error: true

@@ -93,8 +93,8 @@
 
     <form method="POST">
         {% csrf_token %}
-        <input type="text" name="username" placeholder="Roll No (e.g., ITA700)" required>
-        <input type="password" name="password" placeholder="Admission No (e.g., 2022PE0000)" required>
+        <input type="text" name="username" placeholder="Roll No (e.g., ITA704)" required>
+        <input type="password" name="password" placeholder="Admission No (e.g., 2022PE0202)" required>
         <button type="submit">Register</button>
     </form>
     <a href="{% url 'login' %}">Already have an account? Login</a>

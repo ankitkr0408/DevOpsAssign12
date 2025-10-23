@@ -1,4 +1,4 @@
-name: Deploy to AWS
+name: Deploy to AWS (Fixed)
 
 on:
   push:
@@ -18,10 +18,10 @@ jobs:
     
     steps:
     - name: Checkout code
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
       
     - name: Set up Python
-      uses: actions/setup-python@v4
+      uses: actions/setup-python@v5
       with:
         python-version: '3.11'
         
@@ -49,10 +49,10 @@ jobs:
     
     steps:
     - name: Checkout code
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
       
     - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v2
+      uses: docker/setup-buildx-action@v3
       
     - name: Build Django image
       run: |
@@ -68,29 +68,47 @@ jobs:
         docker images | grep django-app
         docker images | grep postgres-app
         
+  # Check if AWS secrets are available
+  check-secrets:
+    runs-on: ubuntu-latest
+    outputs:
+      has-aws-secrets: ${{ steps.check.outputs.has-secrets }}
+    steps:
+    - name: Check for AWS secrets
+      id: check
+      run: |
+        if [[ -n "${{ secrets.AWS_ACCESS_KEY_ID }}" && -n "${{ secrets.AWS_SECRET_ACCESS_KEY }}" ]]; then
+          echo "has-secrets=true" >> $GITHUB_OUTPUT
+        else
+          echo "has-secrets=false" >> $GITHUB_OUTPUT
+        fi
+        
   deploy:
     runs-on: ubuntu-latest
     name: Deploy to AWS
-    needs: [test, build]
-    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/ITA')
+    needs: [test, build, check-secrets]
+    if: |
+      needs.check-secrets.outputs.has-aws-secrets == 'true' && 
+      (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/ITA'))
     
     steps:
     - name: Checkout code
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
       
     - name: Configure AWS credentials
-      uses: aws-actions/configure-aws-credentials@v2
+      uses: aws-actions/configure-aws-credentials@v4
       with:
         aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
         aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         aws-region: ${{ env.AWS_REGION }}
+        mask-aws-account-id: false
         
     - name: Verify AWS credentials
       run: |
         aws sts get-caller-identity
         
     - name: Set up Terraform
-      uses: hashicorp/setup-terraform@v2
+      uses: hashicorp/setup-terraform@v3
       with:
         terraform_version: 1.5.0
         
@@ -164,8 +182,30 @@ jobs:
       uses: actions/upload-artifact@v4
       if: always()
       with:
-        name: test-report
+        name: test-report-${{ github.run_number }}
         path: test-report-*.txt
+        retention-days: 30
+        
+  # Skip deployment if no AWS secrets
+  skip-deploy:
+    runs-on: ubuntu-latest
+    name: Skip AWS Deployment
+    needs: [test, build, check-secrets]
+    if: needs.check-secrets.outputs.has-aws-secrets == 'false'
+    
+    steps:
+    - name: Skip deployment message
+      run: |
+        echo "⚠️ AWS deployment skipped - AWS credentials not configured"
+        echo ""
+        echo "To enable AWS deployment:"
+        echo "1. Go to repository Settings → Secrets and variables → Actions"
+        echo "2. Add AWS_ACCESS_KEY_ID secret"
+        echo "3. Add AWS_SECRET_ACCESS_KEY secret"
+        echo "4. Re-run the workflow"
+        echo ""
+        echo "✅ Local testing and Docker builds completed successfully!"
+        echo "✅ You can still deploy manually using: ./scripts/free-tier-deploy.sh"
         
   cleanup-on-failure:
     runs-on: ubuntu-latest
@@ -175,17 +215,17 @@ jobs:
     
     steps:
     - name: Checkout code
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
       
     - name: Configure AWS credentials
-      uses: aws-actions/configure-aws-credentials@v2
+      uses: aws-actions/configure-aws-credentials@v4
       with:
         aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
         aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         aws-region: ${{ env.AWS_REGION }}
         
     - name: Set up Terraform
-      uses: hashicorp/setup-terraform@v2
+      uses: hashicorp/setup-terraform@v3
       with:
         terraform_version: 1.5.0
         
